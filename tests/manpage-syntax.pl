@@ -28,6 +28,9 @@
 use strict;
 use warnings;
 
+# get the file name first
+my $symbolsinversions=shift @ARGV;
+
 # we may get the dir roots pointed out
 my @manpages=@ARGV;
 my $errors = 0;
@@ -46,6 +49,18 @@ my @order = (
     );
 my %shline; # section => line number
 
+my %symbol;
+sub allsymbols {
+    open(F, "<$symbolsinversions") ||
+        die "$symbolsinversions: $|";
+    while(<F>) {
+        if($_ =~ /^([^ ]*)/) {
+            $symbol{$1}=$1;
+        }
+    }
+    close(F);
+}
+
 sub scanmanpage {
     my ($file) = @_;
     my $reqex = 0;
@@ -54,24 +69,24 @@ sub scanmanpage {
     my $shc = 0;
     my @sh;
 
-    print "Check $file\n";
     open(M, "<$file") || die "no such file: $file";
-    if($file =~ /\/CURL[^\/]*.3/) {
+    if($file =~ /[\/\\]CURL[^\/\\]*.3/) {
         # This is the man page for an libcurl option. It requires an example!
         $reqex = 1;
     }
     my $line = 1;
     while(<M>) {
-        if($_ =~ /^.SH EXAMPLE/i) {
+        chomp;
+        if($_ =~ /^\.SH EXAMPLE/i) {
             $inex = 1;
         }
-        elsif($_ =~ /^.SH/i) {
+        elsif($_ =~ /^\.SH/i) {
             $inex = 0;
         }
         elsif($inex)  {
             $exsize++;
         }
-        if($_ =~ /^.SH (.*)/i) {
+        if($_ =~ /^\.SH (.*)/i) {
             my $n = $1;
             # remove enclosing quotes
             $n =~ s/\"(.*)\"\z/$1/;
@@ -94,6 +109,16 @@ sub scanmanpage {
             print STDERR "$file:$line trailing whitespace\n";
             $errors++;
         }
+        if($_ =~ /\\f([BI])([^\\]*)\\fP/) {
+            my $r = $2;
+            if($r =~ /^(CURL.*)\(3\)/) {
+                my $rr = $1;
+                if(!$symbol{$rr}) {
+                    print STDERR "$file:$line link to non-libcurl option $rr!\n";
+                    $errors++;
+                }
+            }
+        }
         $line++;
     }
     close(M);
@@ -106,13 +131,24 @@ sub scanmanpage {
             $errors++;
         }
 
+        if(scalar(@sh) < 3) {
+            print STDERR "$file:$line too few man page sections!\n";
+            $errors++;
+            return;
+        }
+
         my $got;
         my $i = 0;
         my $shused = 1;
         do {
             $got = shift(@sh);
             if($got) {
-                $i = $blessed{$got};
+                if(!$blessed{$got}) {
+                    $i = 0;
+                }
+                else {
+                    $i = $blessed{$got};
+                }
             }
             if($i && $got) {
                 # mandatory section
@@ -125,19 +161,27 @@ sub scanmanpage {
                     return;
                 }
                 $shused++;
-                if($i == 9) {
+                if($i == scalar(@order)) {
                     # last mandatory one, exit
                     $got="";
                 }
             }
         } while($got);
 
-        if($i != 8) {
+        if($i != scalar(@order)) {
             printf STDERR "$file:$line missing mandatory section: %s\n",
                 $order[$i];
+            printf STDERR " Found %u used sections\n", scalar(@sh);
             $errors++;
         }
     }
+}
+
+allsymbols();
+
+if(!$symbol{'CURLALTSVC_H1'}) {
+    print STDERR "didn't get the symbols-in-version!\n";
+    exit;
 }
 
 my $ind = 1;
