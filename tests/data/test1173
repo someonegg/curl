@@ -19,7 +19,7 @@ Man page syntax checks
  </name>
 
 <command type="perl">
-%SRCDIR/manpage-syntax.pl %SRCDIR/../docs/libcurl/symbols-in-versions %SRCDIR/../docs/*.1  %SRCDIR/../docs/libcurl/*.3 %SRCDIR/../docs/libcurl/opts/*.3
+%SRCDIR/manpage-syntax.pl %SRCDIR/../docs/libcurl/symbols-in-versions %SRCDIR/../docs/libcurl/opts/CURLINFO_ACTIVESOCKET.3
 </command>
 </client>
 

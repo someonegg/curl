@@ -93,6 +93,9 @@ sub scanmanpage {
             push @sh, $n;
             $shline{$n} = $line;
         }
+        else {
+            print STDERR "no-SH: $_\n";
+        }
 
         if($_ =~ /^\'/) {
             print STDERR "$file:$line line starts with single quote!\n";
