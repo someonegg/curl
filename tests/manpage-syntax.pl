@@ -88,13 +88,14 @@ sub scanmanpage {
         }
         if($_ =~ /^\.SH (.*)/i) {
             my $n = $1;
+
+            print STDERR "SH: $n\n";
+
             # remove enclosing quotes
             $n =~ s/\"(.*)\"\z/$1/;
             push @sh, $n;
             $shline{$n} = $line;
-        }
-        else {
-            print STDERR "no-SH: $_\n";
+            printf STDERR "SH %u\n", scalar(@sh);
         }
 
         if($_ =~ /^\'/) {
