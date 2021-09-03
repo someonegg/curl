@@ -141,6 +141,7 @@ sub scanmanpage {
         my $got = "start";
         my $i = 0;
         my $shused = 1;
+        my @shorig = @sh;
         while($got) {
             my $finesh;
             $got = shift(@sh);
@@ -172,6 +173,8 @@ sub scanmanpage {
         if($i != scalar(@order)) {
             printf STDERR "$file:$line missing mandatory section: %s\n",
                 $order[$i];
+            printf STDERR "$file:$line section found at index %u: '%s'\n",
+                $i, $shorig[$i];
             printf STDERR " Found %u used sections\n", $shcount;
             $errors++;
         }
