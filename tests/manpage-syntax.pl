@@ -142,18 +142,21 @@ sub scanmanpage {
         my $i = 0;
         my $shused = 1;
         while($got) {
+            my $finesh;
             $got = shift(@sh);
             if($got) {
                 if($blessed{$got}) {
                     $i = $blessed{$got};
+                    $finesh = $got; # a mandatory one
                 }
             }
-            if($i && $got) {
+            if($i && defined($finesh)) {
                 # mandatory section
 
                 if($i != $shused) {
-                    printf STDERR "$file:%u Got $got, when %s was expected\n",
-                        $shline{$got},
+                    printf STDERR "$file:%u Got %s, when %s was expected\n",
+                        $shline{$finesh},
+                        $finesh,
                         $order[$shused-1];
                     $errors++;
                     return;
