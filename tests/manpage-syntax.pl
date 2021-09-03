@@ -88,14 +88,10 @@ sub scanmanpage {
         }
         if($_ =~ /^\.SH (.*)/i) {
             my $n = $1;
-
-            print STDERR "SH: $n\n";
-
             # remove enclosing quotes
             $n =~ s/\"(.*)\"\z/$1/;
             push @sh, $n;
             $shline{$n} = $line;
-            printf STDERR "SH %u\n", scalar(@sh);
         }
 
         if($_ =~ /^\'/) {
@@ -130,27 +126,25 @@ sub scanmanpage {
     if($reqex) {
         # only for libcurl options man-pages
 
+        my $shcount = scalar(@sh); # before @sh gets shifted
         if($exsize < 2) {
             print STDERR "$file:$line missing EXAMPLE section\n";
             $errors++;
         }
 
-        if(scalar(@sh) < 3) {
+        if($shcount < 3) {
             print STDERR "$file:$line too few man page sections!\n";
             $errors++;
             return;
         }
 
-        my $got;
+        my $got = "start";
         my $i = 0;
         my $shused = 1;
-        do {
+        while($got) {
             $got = shift(@sh);
             if($got) {
-                if(!$blessed{$got}) {
-                    $i = 0;
-                }
-                else {
+                if($blessed{$got}) {
                     $i = $blessed{$got};
                 }
             }
@@ -167,15 +161,15 @@ sub scanmanpage {
                 $shused++;
                 if($i == scalar(@order)) {
                     # last mandatory one, exit
-                    $got="";
+                    last;
                 }
             }
-        } while($got);
+        }
 
         if($i != scalar(@order)) {
             printf STDERR "$file:$line missing mandatory section: %s\n",
                 $order[$i];
-            printf STDERR " Found %u used sections\n", scalar(@sh);
+            printf STDERR " Found %u used sections\n", $shcount;
             $errors++;
         }
     }
