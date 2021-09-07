@@ -560,7 +560,7 @@ static CURLcode readwrite_data(struct Curl_easy *data,
                                struct connectdata *conn,
                                struct SingleRequest *k,
                                int *didwhat, bool *done,
-                               bool *comeback)
+                               bool *comeback, bool *didread)
 {
   CURLcode result = CURLE_OK;
   ssize_t nread; /* number of bytes read */
@@ -572,6 +572,7 @@ static CURLcode readwrite_data(struct Curl_easy *data,
 
   *done = FALSE;
   *comeback = FALSE;
+  *didread = FALSE;
 
   /* This is where we loop until we have read everything there is to
      read or we get a CURLE_AGAIN */
@@ -604,6 +605,7 @@ static CURLcode readwrite_data(struct Curl_easy *data,
     if(bytestoread) {
       /* receive data from the network! */
       result = Curl_read(data, conn->sockfd, buf, bytestoread, &nread);
+      *didread = TRUE;
 
       /* read would've blocked */
       if(CURLE_AGAIN == result)
@@ -949,7 +951,7 @@ static void win_update_buffer_size(curl_socket_t sockfd)
  */
 static CURLcode readwrite_upload(struct Curl_easy *data,
                                  struct connectdata *conn,
-                                 int *didwhat)
+                                 int *didwhat, bool *didwrite)
 {
   ssize_t i, si;
   ssize_t bytes_written;
@@ -962,6 +964,7 @@ static CURLcode readwrite_upload(struct Curl_easy *data,
     Curl_pgrsTime(data, TIMER_STARTTRANSFER);
 
   *didwhat |= KEEP_SEND;
+  *didwrite = FALSE;
 
   do {
     curl_off_t nbody;
@@ -1098,6 +1101,7 @@ static CURLcode readwrite_upload(struct Curl_easy *data,
                         k->upload_fromhere, /* buffer pointer */
                         k->upload_present,  /* buffer size */
                         &bytes_written);    /* actually sent */
+    *didwrite = TRUE;
     if(result)
       return result;
 
@@ -1177,6 +1181,7 @@ CURLcode Curl_readwrite(struct connectdata *conn,
   struct SingleRequest *k = &data->req;
   CURLcode result;
   int didwhat = 0;
+  bool didread = FALSE, didwrite = FALSE;
 
   curl_socket_t fd_read;
   curl_socket_t fd_write;
@@ -1223,7 +1228,7 @@ CURLcode Curl_readwrite(struct connectdata *conn,
      the stream was rewound (in which case we have data in a
      buffer) */
   if((k->keepon & KEEP_RECV) && (select_res & CURL_CSELECT_IN)) {
-    result = readwrite_data(data, conn, k, &didwhat, done, comeback);
+    result = readwrite_data(data, conn, k, &didwhat, done, comeback, &didread);
     if(result || *done)
       return result;
   }
@@ -1232,13 +1237,20 @@ CURLcode Curl_readwrite(struct connectdata *conn,
   if((k->keepon & KEEP_SEND) && (select_res & CURL_CSELECT_OUT)) {
     /* write */
 
-    result = readwrite_upload(data, conn, &didwhat);
+    result = readwrite_upload(data, conn, &didwhat, &didwrite);
     if(result)
       return result;
   }
 #ifdef USE_HYPER
   }
 #endif
+
+  if(!(didread || didwrite)) {
+    // may time out
+    result = Curl_quic_on_timeout(data, conn);
+    if(result)
+      return result;
+  }
 
   k->now = Curl_now();
   if(!didwhat) {

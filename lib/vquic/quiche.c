@@ -69,6 +69,8 @@ static int quiche_getsock(struct Curl_easy *data,
                           struct connectdata *conn, curl_socket_t *socks)
 {
   struct SingleRequest *k = &data->req;
+  struct HTTP *stream = data->req.p.http;
+  struct quicsocket *qs = conn->quic;
   int bitmap = GETSOCK_BLANK;
 
   socks[0] = conn->sock[FIRSTSOCKET];
@@ -77,9 +79,20 @@ static int quiche_getsock(struct Curl_easy *data,
      always be ready for one */
   bitmap |= GETSOCK_READSOCK(FIRSTSOCKET);
 
-  /* we're still uploading or the HTTP/2 layer wants to send data */
-  if((k->keepon & (KEEP_SEND|KEEP_SEND_PAUSE)) == KEEP_SEND)
+  /* we're still can uploading or the QUIC layer wants to send data */
+  if((k->keepon & (KEEP_SEND|KEEP_SEND_PAUSE)) == KEEP_SEND) {
+    bool stream_writable = TRUE;
+    if((qs != NULL) && (stream != NULL) && stream->h3req) {
+      ssize_t cap = quiche_conn_stream_capacity(qs->conn, stream->stream3_id);
+      stream_writable = (cap > stream->congested_cap) ? TRUE : FALSE;
+    }
+    if(stream_writable) {
+      bitmap |= GETSOCK_WRITESOCK(FIRSTSOCKET);
+    }
+  }
+  if((qs != NULL) && qs->want_write) {
     bitmap |= GETSOCK_WRITESOCK(FIRSTSOCKET);
+  }
 
   return bitmap;
 }
@@ -366,14 +379,13 @@ static CURLcode process_ingress(struct Curl_easy *data, int sockfd,
 
   DEBUGASSERT(qs->conn);
 
-  /* in case the timeout expired */
-  quiche_conn_on_timeout(qs->conn);
-
   do {
     from_len = sizeof(from);
 
-    recvd = recvfrom(sockfd, buf, bufsize, 0,
-                     (struct sockaddr *)&from, &from_len);
+    while((recvd = recvfrom(sockfd, buf, bufsize, 0,
+                            (struct sockaddr *)&from, &from_len)) == -1 &&
+          SOCKERRNO == EINTR)
+      ;
 
     if((recvd < 0) && ((SOCKERRNO == EAGAIN) || (SOCKERRNO == EWOULDBLOCK)))
       break;
@@ -412,17 +424,32 @@ static CURLcode flush_egress(struct Curl_easy *data, int sockfd,
   int64_t timeout_ns;
   quiche_send_info send_info;
 
+  /* in case the timeout expired */
+  quiche_conn_on_timeout(qs->conn);
+  if(quiche_conn_is_closed(qs->conn))
+    return CURLE_SEND_ERROR;
+
+  qs->want_write = TRUE;
+
   do {
     sent = quiche_conn_send(qs->conn, out, sizeof(out), &send_info);
-    if(sent == QUICHE_ERR_DONE)
+    if(sent == QUICHE_ERR_DONE) {
+      qs->want_write = FALSE;
       break;
+    }
 
     if(sent < 0) {
       failf(data, "quiche_conn_send returned %zd", sent);
       return CURLE_SEND_ERROR;
     }
 
-    sent = send(sockfd, out, sent, 0);
+    while((sent = send(sockfd, out, sent, 0)) == -1 &&
+          SOCKERRNO == EINTR)
+      ;
+
+    if((sent < 0) && ((SOCKERRNO == EAGAIN) || (SOCKERRNO == EWOULDBLOCK)))
+      break; // Cache packet ?
+
     if(sent < 0) {
       failf(data, "send() returned %zd", sent);
       return CURLE_SEND_ERROR;
@@ -588,10 +615,21 @@ static ssize_t h3_stream_send(struct Curl_easy *data,
     H3BUGF(infof(data, "Pass on %zd body bytes to quiche", len));
     sent = quiche_h3_send_body(qs->h3c, qs->conn, stream->stream3_id,
                                (uint8_t *)mem, len, FALSE);
+    if(sent == QUICHE_H3_ERR_DONE) {
+      sent = 0;
+    }
     if(sent < 0) {
       *curlcode = CURLE_SEND_ERROR;
       return -1;
     }
+  }
+
+  if(sent < len) {
+    stream->congested_cap = quiche_conn_stream_capacity(qs->conn,
+                                                        stream->stream3_id);
+  }
+  else {
+    stream->congested_cap = 0;
   }
 
   if(flush_egress(data, sockfd, qs)) {
@@ -803,20 +841,12 @@ static CURLcode http_request(struct Curl_easy *data, const void *mem,
 
     stream3_id = quiche_h3_send_request(qs->h3c, qs->conn, nva, nheader,
                                         stream->upload_left ? FALSE: TRUE);
-    if((stream3_id >= 0) && data->set.postfields) {
-      ssize_t sent = quiche_h3_send_body(qs->h3c, qs->conn, stream3_id,
-                                         (uint8_t *)data->set.postfields,
-                                         stream->upload_left, TRUE);
-      if(sent <= 0) {
-        failf(data, "quiche_h3_send_body failed!");
-        result = CURLE_SEND_ERROR;
-      }
-      stream->upload_left = 0; /* nothing left to send */
-    }
+    stream->fin_sent = stream->upload_left ? FALSE: TRUE;
     break;
   default:
     stream3_id = quiche_h3_send_request(qs->h3c, qs->conn, nva, nheader,
                                         TRUE);
+    stream->fin_sent = TRUE;
     break;
   }
 
@@ -847,19 +877,63 @@ CURLcode Curl_quic_done_sending(struct Curl_easy *data)
 {
   struct connectdata *conn = data->conn;
   DEBUGASSERT(conn);
-  if(conn->handler == &Curl_handler_http3) {
-    /* only for HTTP/3 transfers */
+  struct quicsocket *qs = conn->quic;
+  struct SingleRequest *k = &data->req;
+  struct HTTP *stream = data->req.p.http;
+
+  if(conn->handler != &Curl_handler_http3) {
+    return CURLE_OK;
+  }
+  /* only for HTTP/3 transfers */
+
+  stream->upload_done = TRUE;
+
+  if(!stream->fin_sent) {
     ssize_t sent;
-    struct HTTP *stream = data->req.p.http;
-    struct quicsocket *qs = conn->quic;
-    stream->upload_done = TRUE;
     sent = quiche_h3_send_body(qs->h3c, qs->conn, stream->stream3_id,
                                NULL, 0, TRUE);
-    if(sent < 0)
+    if(sent == QUICHE_H3_ERR_DONE) {
+      stream->congested_cap = quiche_conn_stream_capacity(qs->conn,
+                                                          stream->stream3_id);
+      goto recall;
+    }
+    stream->congested_cap = 0;
+    stream->fin_sent = TRUE;
+    if(sent < 0) {
       return CURLE_SEND_ERROR;
+    }
+  }
+
+  if(flush_egress(data, qs->sockfd, qs)) {
+    return CURLE_SEND_ERROR;
+  }
+  if(qs->want_write) {
+    goto recall;
   }
 
   return CURLE_OK;
+
+recall:
+  /* re-set KEEP_SEND to make sure we are called again */
+  k->keepon |= KEEP_SEND;
+  stream->upload_done = FALSE;
+  return CURLE_OK;
+}
+
+/*
+ * Called from transfer.c:Curl_readwrite when may time out.
+ */
+CURLcode Curl_quic_on_timeout(struct Curl_easy *data,
+                              struct connectdata *conn)
+{
+  struct quicsocket *qs = conn->quic;
+
+  if(conn->handler != &Curl_handler_http3) {
+    return CURLE_OK;
+  }
+  /* only for HTTP/3 transfers */
+
+  return flush_egress(data, qs->sockfd, qs);
 }
 
 /*

@@ -1868,6 +1868,17 @@ CURLcode Curl_quic_done_sending(struct Curl_easy *data)
 }
 
 /*
+ * Called from transfer.c:Curl_readwrite when may time out.
+ */
+CURLcode Curl_quic_on_timeout(struct Curl_easy *data,
+                              struct connectdata *conn)
+{
+  (void)data;
+  (void)conn;
+  return CURLE_OK;
+}
+
+/*
  * Called from http.c:Curl_http_done when a request completes.
  */
 void Curl_quic_done(struct Curl_easy *data, bool premature)
