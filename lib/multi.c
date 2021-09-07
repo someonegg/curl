@@ -921,13 +921,17 @@ static int waitconnect_getsock(struct connectdata *conn,
 
   for(i = 0; i<2; i++) {
     if(conn->tempsock[i] != CURL_SOCKET_BAD) {
+#ifdef ENABLE_QUIC
+      if(conn->transport == TRNSPRT_QUIC) {
+        /* when connecting QUIC, we want to read the socket */
+        sock[s] = conn->tempsock[i];
+        rc |= GETSOCK_READSOCK(s);
+        s++;
+        continue;
+      }
+#endif
       sock[s] = conn->tempsock[i];
       rc |= GETSOCK_WRITESOCK(s);
-#ifdef ENABLE_QUIC
-      if(conn->transport == TRNSPRT_QUIC)
-        /* when connecting QUIC, we want to read the socket too */
-        rc |= GETSOCK_READSOCK(s);
-#endif
       s++;
     }
   }
