@@ -52,6 +52,7 @@
 #define QUIC_MAX_STREAMS (256*1024)
 #define QUIC_MAX_DATA (1*1024*1024)
 #define QUIC_IDLE_TIMEOUT (60 * 1000) /* milliseconds */
+#define QUIC_PING_TIMEOUT (10 * 1000) /* milliseconds */
 
 static CURLcode process_ingress(struct Curl_easy *data,
                                 curl_socket_t sockfd,
@@ -82,7 +83,7 @@ static int quiche_getsock(struct Curl_easy *data,
   /* we're still can uploading or the QUIC layer wants to send data */
   if((k->keepon & (KEEP_SEND|KEEP_SEND_PAUSE)) == KEEP_SEND) {
     bool stream_writable = TRUE;
-    if((qs != NULL) && (stream != NULL) && stream->h3req) {
+    if(qs && stream && stream->h3req) {
       ssize_t cap = quiche_conn_stream_capacity(qs->conn, stream->stream3_id);
       stream_writable = (cap > stream->congested_cap) ? TRUE : FALSE;
     }
@@ -90,7 +91,7 @@ static int quiche_getsock(struct Curl_easy *data,
       bitmap |= GETSOCK_WRITESOCK(FIRSTSOCKET);
     }
   }
-  if((qs != NULL) && qs->want_write) {
+  if(qs && qs->want_write) {
     bitmap |= GETSOCK_WRITESOCK(FIRSTSOCKET);
   }
 
@@ -117,6 +118,7 @@ static CURLcode qs_disconnect(struct Curl_easy *data,
     quiche_config_free(qs->cfg);
     qs->cfg = NULL;
   }
+  qs->want_write = FALSE;
   return CURLE_OK;
 }
 
@@ -327,6 +329,7 @@ static CURLcode quiche_has_connected(struct connectdata *conn,
     quiche_conn_free(qs->conn);
     qs->cfg = NULL;
     qs->conn = NULL;
+    qs->want_write = FALSE;
   }
   return CURLE_OK;
   fail:
@@ -423,11 +426,25 @@ static CURLcode flush_egress(struct Curl_easy *data, int sockfd,
   uint8_t out[1200];
   int64_t timeout_ns;
   quiche_send_info send_info;
+  struct HTTP *stream = data->req.p.http;
 
   /* in case the timeout expired */
   quiche_conn_on_timeout(qs->conn);
   if(quiche_conn_is_closed(qs->conn))
     return CURLE_SEND_ERROR;
+
+  if(stream && stream->keepalive) {
+    struct curltime now = Curl_now();
+    timediff_t diff = Curl_timediff(now, qs->last_ping);
+    if(diff >= QUIC_PING_TIMEOUT) {
+      // TODO ping
+      qs->last_ping = now;
+      Curl_expire(data, QUIC_PING_TIMEOUT, EXPIRE_QUIC_PING);
+    }
+    else {
+      Curl_expire(data, QUIC_PING_TIMEOUT-diff, EXPIRE_QUIC_PING);
+    }
+  }
 
   qs->want_write = TRUE;
 
@@ -863,6 +880,12 @@ static CURLcode http_request(struct Curl_easy *data, const void *mem,
         stream3_id, (void *)data);
   stream->stream3_id = stream3_id;
 
+  if(stream->fin_sent) {
+    stream->keepalive = TRUE;
+    qs->last_ping = Curl_now();
+    Curl_expire(data, QUIC_PING_TIMEOUT, EXPIRE_QUIC_PING);
+  }
+
   return CURLE_OK;
 
 fail:
@@ -911,6 +934,9 @@ CURLcode Curl_quic_done_sending(struct Curl_easy *data)
     goto recall;
   }
 
+  stream->keepalive = TRUE;
+  qs->last_ping = Curl_now();
+  Curl_expire(data, QUIC_PING_TIMEOUT, EXPIRE_QUIC_PING);
   return CURLE_OK;
 
 recall:
@@ -941,8 +967,13 @@ CURLcode Curl_quic_on_timeout(struct Curl_easy *data,
  */
 void Curl_quic_done(struct Curl_easy *data, bool premature)
 {
-  (void)data;
   (void)premature;
+
+  struct HTTP *stream = data->req.p.http;
+  if(!stream)
+    return;
+
+  stream->keepalive = FALSE;
 }
 
 /*

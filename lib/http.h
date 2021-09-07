@@ -232,6 +232,7 @@ struct HTTP {
   /*********** for HTTP/3 we store stream-local data here *************/
   int64_t stream3_id; /* stream we are interested in */
   ssize_t congested_cap; /* stream capacity when a partial write happens */
+  bool keepalive;
   bool firstheader;  /* FALSE until headers arrive */
   bool firstbody;  /* FALSE until body arrives */
   bool h3req;    /* FALSE until request is issued */

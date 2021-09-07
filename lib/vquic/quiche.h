@@ -43,8 +43,8 @@ struct quicsocket {
   uint8_t scid[QUICHE_MAX_CONN_ID_LEN];
   curl_socket_t sockfd;
   uint32_t version;
-
   bool want_write; /* the QUIC layer wants to send data */
+  struct curltime last_ping;
 };
 
 #endif
